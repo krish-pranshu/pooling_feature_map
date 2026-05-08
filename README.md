@@ -1,1 +1,0 @@
-# pooling_feature_map
