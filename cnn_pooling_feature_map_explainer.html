@@ -1,0 +1,342 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CNN Feature Map & Pooling Explainer</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-slate-100 font-sans text-slate-800 p-4 md:p-8 flex flex-col items-center">
+
+    <div class="max-w-4xl w-full">
+        <!-- Header -->
+        <div class="mb-6 text-center">
+            <h1 class="text-3xl font-bold text-slate-900 mb-2">How CNNs See: Feature Maps & Pooling</h1>
+            <p class="text-slate-600">Watch how an image is scanned by a "Filter" to create a Feature Map, and then how it gets summarized (shrunk) through Max Pooling.</p>
+        </div>
+
+        <!-- Canvas Container -->
+        <div id="canvasContainer" class="relative w-full bg-white rounded-xl shadow-lg border border-slate-200 overflow-hidden pt-4 pb-6 px-4 mb-6">
+            <canvas id="cnnCanvas" class="w-full h-auto block mx-auto"></canvas>
+            
+            <!-- Controls -->
+            <div class="flex justify-center gap-4 mt-6">
+                <button id="playBtn" class="px-6 py-2 bg-blue-600 text-white font-medium rounded-lg shadow hover:bg-blue-700 transition-colors">
+                    Pause
+                </button>
+                <button id="resetBtn" class="px-6 py-2 bg-slate-200 text-slate-800 font-medium rounded-lg hover:bg-slate-300 transition-colors">
+                    Restart Animation
+                </button>
+            </div>
+        </div>
+
+        <!-- Explanation text below -->
+        <div class="bg-white rounded-xl shadow p-6 border border-slate-200">
+            <h2 class="text-xl font-bold mb-4 border-b pb-2">What is happening?</h2>
+            <ul class="space-y-4">
+                <li class="flex items-start gap-3">
+                    <span class="flex-shrink-0 w-8 h-8 rounded-full bg-yellow-100 text-yellow-600 flex items-center justify-center font-bold">1</span>
+                    <div>
+                        <strong class="text-slate-900">Scanning (Convolution):</strong> A small sliding window (the yellow box) moves across the original image. It's looking for a specific pattern. When it finds a strong match, it records a high number in the new <strong>Feature Map</strong>.
+                    </div>
+                </li>
+                <li class="flex items-start gap-3">
+                    <span class="flex-shrink-0 w-8 h-8 rounded-full bg-red-100 text-red-600 flex items-center justify-center font-bold">2</span>
+                    <div>
+                        <strong class="text-slate-900">Summarizing (Max Pooling):</strong> Now, we take the Feature Map and look at it in 2x2 blocks (the red box). For each block, we only keep the <em>largest</em> number. This shrinks our map down while keeping the most important "loudest" signals.
+                    </div>
+                </li>
+            </ul>
+        </div>
+    </div>
+
+    <script>
+        window.onload = function() {
+            const canvas = document.getElementById('cnnCanvas');
+            const ctx = canvas.getContext('2d');
+            const container = document.getElementById('canvasContainer');
+
+            // Virtual fixed resolution
+            const V_WIDTH = 800;
+            const V_HEIGHT = 420;
+            let scaleRatio = 1;
+
+            function resizeCanvas() {
+                const width = container.clientWidth - 32; // padding offset
+                const height = width * (V_HEIGHT / V_WIDTH);
+                canvas.width = width;
+                canvas.height = height;
+                scaleRatio = width / V_WIDTH;
+                drawScene();
+            }
+
+            window.addEventListener('resize', resizeCanvas);
+
+            // Animation State Machine
+            let state = 'SCANNING'; // SCANNING, SCAN_DONE, POOLING, POOL_DONE
+            let scanIndex = 0;      // 0 to 15 (4x4 feature map)
+            let poolIndex = 0;      // 0 to 3 (2x2 pooled map)
+            
+            let lastFrameTime = 0;
+            let timeAccumulator = 0;
+            const SCAN_SPEED = 200; // ms per block
+            const POOL_SPEED = 700; // ms per block
+            let isPlaying = true;
+
+            // Static Data Grids (0.0 to 1.0 representing brightness/intensity)
+            const inputGrid = [
+                [0.2, 0.3, 0.8, 0.9, 0.2, 0.1],
+                [0.2, 0.4, 0.9, 0.8, 0.3, 0.1],
+                [0.7, 0.9, 0.2, 0.3, 0.8, 0.7],
+                [0.8, 0.8, 0.1, 0.2, 0.9, 0.8],
+                [0.2, 0.3, 0.7, 0.8, 0.2, 0.2],
+                [0.1, 0.2, 0.8, 0.9, 0.1, 0.1],
+            ];
+
+            const featureTarget = [
+                [0.1, 0.2, 0.8, 0.9],
+                [0.1, 0.3, 0.7, 0.8],
+                [0.4, 0.5, 0.1, 0.2],
+                [0.6, 0.9, 0.1, 0.1],
+            ];
+
+            // Target for Max Pooling (Taking the max of 2x2 blocks from featureTarget)
+            const poolTarget = [
+                [0.3, 0.9],
+                [0.9, 0.2],
+            ];
+
+            // Changing data arrays
+            let currentFeature = Array(4).fill(null).map(() => Array(4).fill(null));
+            let currentPool = Array(2).fill(null).map(() => Array(2).fill(null));
+
+            // Controls
+            document.getElementById('playBtn').addEventListener('click', (e) => {
+                isPlaying = !isPlaying;
+                e.target.innerText = isPlaying ? 'Pause' : 'Play';
+            });
+            document.getElementById('resetBtn').addEventListener('click', () => {
+                resetAnimation();
+                if (!isPlaying) {
+                    isPlaying = true;
+                    document.getElementById('playBtn').innerText = 'Pause';
+                }
+            });
+
+            function resetAnimation() {
+                state = 'SCANNING';
+                scanIndex = 0;
+                poolIndex = 0;
+                timeAccumulator = 0;
+                currentFeature = Array(4).fill(null).map(() => Array(4).fill(null));
+                currentPool = Array(2).fill(null).map(() => Array(2).fill(null));
+            }
+
+            function animate(time) {
+                if (!lastFrameTime) lastFrameTime = time;
+                const dt = time - lastFrameTime;
+                lastFrameTime = time;
+
+                if (isPlaying) {
+                    timeAccumulator += dt;
+                    
+                    if (state === 'SCANNING' && timeAccumulator > SCAN_SPEED) {
+                        scanIndex++;
+                        timeAccumulator = 0;
+                        if (scanIndex >= 16) {
+                            state = 'SCAN_DONE';
+                            timeAccumulator = 0;
+                        }
+                    } else if (state === 'SCAN_DONE' && timeAccumulator > 1500) {
+                        state = 'POOLING';
+                        timeAccumulator = 0;
+                    } else if (state === 'POOLING' && timeAccumulator > POOL_SPEED) {
+                        poolIndex++;
+                        timeAccumulator = 0;
+                        if (poolIndex >= 4) {
+                            state = 'POOL_DONE';
+                            timeAccumulator = 0;
+                        }
+                    } else if (state === 'POOL_DONE' && timeAccumulator > 4000) {
+                        resetAnimation();
+                    }
+                }
+
+                updateDataState();
+                drawScene();
+                requestAnimationFrame(animate);
+            }
+
+            function updateDataState() {
+                // Wipe and refill based on progress
+                currentFeature = Array(4).fill(null).map(() => Array(4).fill(null));
+                currentPool = Array(2).fill(null).map(() => Array(2).fill(null));
+
+                // Fill Feature Map
+                const limitFeature = (state === 'SCANNING') ? scanIndex : 16;
+                for (let i = 0; i <= limitFeature && i < 16; i++) {
+                    let r = Math.floor(i / 4);
+                    let c = i % 4;
+                    currentFeature[r][c] = featureTarget[r][c];
+                }
+
+                // Fill Pooled Map
+                if (state === 'POOLING' || state === 'POOL_DONE') {
+                    const limitPool = (state === 'POOLING') ? poolIndex : 4;
+                    for (let i = 0; i <= limitPool && i < 4; i++) {
+                        let r = Math.floor(i / 2);
+                        let c = i % 2;
+                        currentPool[r][c] = poolTarget[r][c];
+                    }
+                }
+            }
+
+            function drawScene() {
+                ctx.clearRect(0, 0, canvas.width, canvas.height);
+                ctx.save();
+                ctx.scale(scaleRatio, scaleRatio);
+
+                // Coordinates
+                const inX = 60, inY = 90, inCell = 30;
+                const featX = 350, featY = 120, featCell = 30;
+                const poolX = 600, poolY = 150, poolCell = 30;
+
+                // Determine Highlights
+                let inputHL = null, featureHL = null, poolHL = null;
+
+                if (state === 'SCANNING') {
+                    let r = Math.floor(scanIndex / 4);
+                    let c = scanIndex % 4;
+                    inputHL = { r: r, c: c, w: 3, h: 3, color: '#eab308', label: 'Filter' };
+                    featureHL = { r: r, c: c, w: 1, h: 1, color: '#eab308' };
+                } else if (state === 'POOLING') {
+                    let pr = Math.floor(poolIndex / 2);
+                    let pc = poolIndex % 2;
+                    featureHL = { r: pr * 2, c: pc * 2, w: 2, h: 2, color: '#ef4444', label: 'Max of 4' };
+                    poolHL = { r: pr, c: pc, w: 1, h: 1, color: '#ef4444' };
+                }
+
+                // Draw Grids
+                drawGrid(inX, inY, 6, 6, inCell, inputGrid, "Original Image (6x6)", inputHL);
+                drawGrid(featX, featY, 4, 4, featCell, currentFeature, "Feature Map (4x4)", featureHL);
+                drawGrid(poolX, poolY, 2, 2, poolCell, currentPool, "Pooled Map (2x2)", poolHL);
+
+                // Draw Arrows
+                drawArrow(inX + 180 + 15, inY + 90, featX - 15, featY + 60, "Scanning");
+                drawArrow(featX + 120 + 15, featY + 60, poolX - 15, poolY + 30, "Summarize");
+
+                // Draw Status Message
+                drawStatus();
+
+                ctx.restore();
+            }
+
+            function drawGrid(x, y, rows, cols, cellSize, data, title, hl) {
+                ctx.save();
+                ctx.translate(x, y);
+
+                // Title
+                ctx.fillStyle = '#1e293b';
+                ctx.font = 'bold 16px sans-serif';
+                ctx.textAlign = 'center';
+                ctx.fillText(title, (cols * cellSize) / 2, -20);
+
+                // Cells
+                for (let r = 0; r < rows; r++) {
+                    for (let c = 0; c < cols; c++) {
+                        let val = data[r] ? data[r][c] : null;
+                        
+                        // Background
+                        ctx.fillStyle = val === null ? '#f1f5f9' : `rgba(37, 99, 235, ${val})`;
+                        ctx.fillRect(c * cellSize, r * cellSize, cellSize, cellSize);
+                        
+                        // Border
+                        ctx.strokeStyle = '#cbd5e1';
+                        ctx.lineWidth = 1;
+                        ctx.strokeRect(c * cellSize, r * cellSize, cellSize, cellSize);
+
+                        // Text (Value)
+                        if (val !== null) {
+                            ctx.fillStyle = val > 0.4 ? '#ffffff' : '#1e293b';
+                            ctx.font = '11px sans-serif';
+                            ctx.textAlign = 'center';
+                            ctx.textBaseline = 'middle';
+                            ctx.fillText(val.toFixed(1), c * cellSize + cellSize / 2, r * cellSize + cellSize / 2);
+                        }
+                    }
+                }
+
+                // Highlight Overlay
+                if (hl) {
+                    ctx.strokeStyle = hl.color;
+                    ctx.lineWidth = 4;
+                    ctx.strokeRect(hl.c * cellSize, hl.r * cellSize, hl.w * cellSize, hl.h * cellSize);
+
+                    // Optional Tag for the highlight box
+                    if (hl.label) {
+                        ctx.fillStyle = hl.color;
+                        ctx.font = 'bold 12px sans-serif';
+                        ctx.textAlign = 'left';
+                        ctx.fillText(hl.label, hl.c * cellSize, hl.r * cellSize - 6);
+                    }
+                }
+
+                ctx.restore();
+            }
+
+            function drawArrow(fromX, fromY, toX, toY, text) {
+                const headlen = 12;
+                const dx = toX - fromX;
+                const dy = toY - fromY;
+                const angle = Math.atan2(dy, dx);
+
+                ctx.beginPath();
+                ctx.moveTo(fromX, fromY);
+                ctx.lineTo(toX, toY);
+                ctx.strokeStyle = '#94a3b8';
+                ctx.lineWidth = 3;
+                ctx.stroke();
+
+                // Arrow head
+                ctx.beginPath();
+                ctx.moveTo(toX, toY);
+                ctx.lineTo(toX - headlen * Math.cos(angle - Math.PI / 6), toY - headlen * Math.sin(angle - Math.PI / 6));
+                ctx.lineTo(toX - headlen * Math.cos(angle + Math.PI / 6), toY - headlen * Math.sin(angle + Math.PI / 6));
+                ctx.lineTo(toX, toY);
+                ctx.fillStyle = '#94a3b8';
+                ctx.fill();
+
+                if (text) {
+                    ctx.fillStyle = '#64748b';
+                    ctx.font = 'italic 14px sans-serif';
+                    ctx.textAlign = 'center';
+                    ctx.fillText(text, fromX + dx / 2, fromY - 10);
+                }
+            }
+
+            function drawStatus() {
+                ctx.fillStyle = '#0f172a';
+                ctx.font = 'bold 18px sans-serif';
+                ctx.textAlign = 'center';
+                
+                let msg = "";
+                if (state === 'SCANNING') {
+                    msg = "Phase 1: Filter sliding over image to find patterns...";
+                } else if (state === 'SCAN_DONE') {
+                    msg = "Feature Map is complete! We found where the patterns are.";
+                } else if (state === 'POOLING') {
+                    msg = "Phase 2: Max Pooling. Taking the highest number from every 2x2 block.";
+                } else if (state === 'POOL_DONE') {
+                    msg = "Finished! The map is now summarized and smaller.";
+                }
+
+                ctx.fillText(msg, V_WIDTH / 2, V_HEIGHT - 30);
+            }
+
+            // Kick off
+            resizeCanvas();
+            requestAnimationFrame(animate);
+        };
+    </script>
+</body>
+</html>
